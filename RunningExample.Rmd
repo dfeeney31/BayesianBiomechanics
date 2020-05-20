@@ -1,0 +1,153 @@
+---
+title: "The Bayesian Biomechanist"
+author: "Dan Feeney"
+date: "5/19/2020"
+output: html_document
+---
+
+# The goal of this tutorial is to show how I use Bayesian (or Probabilistic) models to understand small sample size data that is common for footwear studies. 
+## This approach can be helpful to transalte findings based on previous research coupled with small-sample size data to a variety of audiences. This is not an entire intro to Bayesian learning, but I will try to explain as best I can, which will hopefully both help the reader and me improve our understanding. 
+## I got into this by first reading and taking Richard McElreath's excellent course on statistical rethinking (here: https://xcelab.net/rm/statistical-rethinking/) and have applied it to our research at BOA Technology. 
+
+# Our process
+### We always start with a larger-scale study to determine an appropriate prior, then we use our smaller-scale studies during a product development cycle to fit a hierarchical model and use Bayesian updating (a fancy way of saying we take what we think we know about the data and see how new observations change it) to make recommendations regarding what we tested. 
+
+# Some reasoning why
+### Bayesian techniques allow you to describe data in terms that are widely understood (i.e. a Bayesian Credible interval is what most people misconstrue a 95% confidence interval to mean). In applying this to these small studies we often do, we are not interested in the arbitrary statistical significance threshold of 0.05 (this is just dichotomizing a continuous variable (p-values), and we know we should avoid that), but we do want to describe our data fairly and robustly. Lastly, we always need to make a recommendation (and usually to a non scientist), which sometimes is difficult using Frequentist statistics & accompanying terminology alone.
+
+# The set up
+### In this example, we will work with a partial dataset from some experimental field testing. The tl;dr version is loading rates from strides before and after a trail run.
+### Slightly more dtail: I use data 4 runners doing 'strides' before and after a 30-minute trail run in two different configuration shoes (lace and DD (or a tri panel like on the New Balance Hierro)). Our question in this case is, 'is there a difference in loading rate between conditions?' In this case, we have a lot of data from our lab (treadmill force plate) where we saw a pretty consistent incresae in vertical loading rate from 12 athletes. Since we are field testing, I am curious if we see similar results magnitude results to outside (given we are now measuring normal force vs. vertical in the lab) and if the additional 'noise' of being on a trail will make a difference. All strides were approximately the same time and length (verified by stopwatch.. because COVID). This is not meant to imply causality between loading rates and anything else, it was just convenient data. 
+```{r}
+#loading required packages, etc. If you are less familiar with R, you may need to install these packages first
+rm(list=ls())
+library(tidyverse)
+library(brms)
+library(tidybayes)
+library(lme4)
+```
+
+## Always start by making some plots to visualize the data. This also lets me use my favorite set of packages in the Tidyverse 
+```{r}
+dat <- read.csv('C:/Users/Daniel.Feeney/Dropbox (Boa)/Endurance Protocol Trail Run/Outdoor_Protocol_March2020/Master.csv')
+dat <- as_tibble(dat)
+dat$PrePost <- factor(dat$PrePost, c('pre','post')) #reorder factors to plot pre before post un ggplot
+
+dat %>%
+  group_by(Subject, PrePost, Config) %>%
+  summarize(
+    AvgRate = mean(RateNorm),
+    SDRate = sd(RateNorm),
+    StanceT = mean(stanceTime),
+    Impulse = mean(ImpulseTotal),
+    ImpulseHeel = mean(HeelImpulse)
+    
+  ) %>%
+  ggplot(mapping = aes(x = PrePost, y = AvgRate, fill = Config)) +
+    geom_bar(position="dodge", stat="identity")+ facet_wrap(~ Subject) +
+    geom_errorbar(aes(ymin=AvgRate-SDRate, ymax=AvgRate+SDRate), width=.2,
+                position=position_dodge(.9))
+
+```
+
+## There appears to be some evidence of a difference between lace and DD (dual dial), but it does not appear to be consistent pre/post. 
+### Let's fit a heirarchical model (allowing each subject to have multiple obvervations, their own itnerep and slopes between conditions, etc.) to estimate the credible interval for a difference and ignore pre/post run for now. 
+
+### In Bayesian lingo, many of the interpretations are more simply trnaslated to a non statistics/scientific audience. For example, a credible interval is what most people think a Frequentist confidence interval is: the interval for which an unobserved parameter falls within (in this case, the difference between lace and dual dial loading rates). 
+
+
+## Below we begin fitting Probabilistic models with the bmrs package. 
+### The BRMS package uses Markov Chain Monte Carlo simulations to run through all the combinations of parameters (e.g. the tihngs you are interested in modeling such as mean loading rate, change in loading rate from one condition to another) and essentially counts the most likely parameters based on the observed data and the prior.There is an entire field of research on MCMC simulations and methodology, which is outside the scope here. The basic idea is you want to sample a large subspace of the parameters and find the ones most likely to produce the data you observed. 
+
+## The basic steps of Probabilistic modeling is 1) set a prior (your knowledge of what the data may look like before seeing it), 2) specify the type of model you want to use (e.g. the slopes and intercepts for the regression), 3) fit the model (if you are reasonable confident in your priors), 4) sample from the posterior (the combo of your prior and newly observed data). 5) score your model and/or make predictions. 
+
+### In the code below, We do steps 1-3. The mechanics of the code are: we expect the values are distributed through a Gaussian process (a reasably good catch all for this kind of data), we fit the normalized loading rate as a function of configuration with random (or subject-specific) interceps for each subject. We use a pretty standard number of iterations for the Markov Chain Monte Carlo simulations, warmup period and chains, and the 4 cores of our computer (the default for the brms package) to parallelize the MCMC searching.
+```{r}
+runmod <- brm(data = dat,
+              family = gaussian,
+              RateNorm ~ Config + (1 | Subject), #fixed efect of configuration with a different intercept and slope for each subject
+              prior = c(prior(normal(25, 5), class = Intercept), #The intercept prior is set as a mean of 25 with an SD of 5 This may be interpceted as the average loading rate (but average is again modified by the subject-specific betas)
+                        prior(normal(0, 3), class = b), #beta for the intercept for the change in loadinr rate for each configuration
+                        prior(cauchy(0, 1), class = sd), #This is a regularizing prior, meaning we will allow the SD of the betas to vary across subjects
+                        prior(cauchy(0, 1), class = sigma)), #overall variabiltiy that is left unexplained 
+              iter = 2000, warmup = 1000, chains = 4, cores = 4,
+              control = list(adapt_delta = .975, max_treedepth = 20),
+              seed = 190831)
+
+print(runmod)
+plot(runmod)
+# The output provides estimates for the parameters of interest: in the simplified case: what is the average change in loading rate for switching from DD to lace? In this case it is about 1.1. Below, we manipualte the posterior to get some more information. 
+posterior <- posterior_samples(runmod) #This extracts the posterior (grabs samples in a proportion to the probability they would be observed)
+sum(posterior$b_ConfigLace > 0) / length(posterior$b_ConfigLace) #There is a 98% chance lace results in a greater VLR (count the number of samples where the lace configuration intercept is greater than 0 (e.g. it is higher than DD))
+mean(posterior$b_ConfigLace) #The maximal a posteriori estimate is that lace increases VLR by 1.1. This is called the maximum a postriori estimate
+
+```
+## First, look at the model output and compare it to the plots from the model. The beta for config_lace in this case is what will help us answer our question about loading rate. In this case, we see the majority of the posterior lies above 0. This lines up with our estimate that there is an increase in loading rate associated with changing from the DD to the lace configuration. 
+
+## Important set of caveats about priors: 
+### I took a slight shortcut and set the priors for the intercept and beta based on results from a previous set of studies where I had an expected value for the intercept of around 25 BW/s and knew the change from lace to a BOA configuration would be somewhere in the 0-3 BW/s range. Another approach if you really are not sure what kind of relation to expect would be to normalize the parameters (z-scores, for example) and set the priors more easily that way. Using that approach, you would say a change from one category to another would be associated with how many SD change in loading rate. 
+
+### There is an entire field of research for setting priors. I am far from an expert, but in general there are a few things to do to set reasonable priors. 1) sample from your prior: make sure the combination of parameters you set in your prior would yield reasonable results (e.g. fit a model based on your formula and are the outputs reasonable? Or do you get a bunch of negative loading rates?). 2) If you have enough data, the data will overwhelm the prior and you will still get a reasonable posterior. 3) Uniform or flat priors are okay for large sample-size data, but priors become more important in small sample size data. Moreover, if you have some previous knowledge about the data, you should include it in the prior. I cannot recommend the course I mentioned above enough if you want to understand this more. 
+
+## Back to our analysis, how does the model fit? You can see the estimate in black circles and all of the data in blue below. 
+```{r}
+dat %>%
+  select(Subject, Config, RateNorm) %>%
+  bind_cols(as_tibble(fitted(runmod))) %>%
+  group_by(Subject) %>%
+  ggplot() +
+  geom_point(aes(x = Config, y = RateNorm), size = 4, alpha = .75, color = "dodgerblue2") +
+  geom_point(aes(x = Config, y = Estimate), shape = 1, size = 4, stroke = 1.5) +
+  labs(x = "Config",
+       y = "Normalized Loading Rate",
+       title = "Fixed effect of condition, random intercept and slopes for subjects",
+       subtitle = "Blue points are observed values. Black circles are fitted values.") +
+  facet_wrap(~Subject) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(hjust = .5))
+
+```
+
+
+## Additionally, we can also fit the subject-specific intercept and slope model. This is a slightly more 'random' model, but because we do not have the same assumptions as the Frequentist approach, we should still be able to sample the parameter space to estimate the betas.
+
+```{r}
+runmod2 <- brm(data = dat,
+              family = gaussian,
+              RateNorm ~ Config + (1 + Config | Subject), #fixed efect of configuration with a different intercept and slope for each subject
+              prior = c(prior(normal(25, 5), class = Intercept), #The intercept prior is set as a mean of 0 with an SD of 10. This may be interpceted as the average loading rate (but average is again modified by the subject-specific betas)
+                        prior(normal(0, 3), class = b), #beta for the intercept for the configuration
+                        prior(cauchy(0, 1), class = sd), #This is a regularizing prior, meaning we will allow the SD of the betas to vary
+                        prior(cauchy(0, 1), class = sigma), #overall standard deviation
+                        prior(lkj_corr_cholesky(1.5), class = cor)), #This is the correlation of fixed effects. 
+              iter = 2000, warmup = 1000, chains = 4, cores = 4,
+              control = list(adapt_delta = .975, max_treedepth = 20),
+              seed = 190831)
+```
+### In this case, the two models (subject-specific intercept alone and with subject-specific sloeps) give very similar outputs. 
+```{r}
+print(runmod2)
+plot(runmod2)
+## We see there is a substantial portion of the beta for the configuration for laces above 0, 
+posterior <- posterior_samples(runmod2)
+sum(posterior$b_ConfigLace > 0) / length(posterior$b_ConfigLace) #There is a 95% probability lace results in a greater VLR
+mean(posterior$b_ConfigLace) #The maximal a posteriori estimate is that lace increases VLR by 1.08 BW/s. 
+```
+## There is a wide array of tools to compare models, but that is outside the scope of this tutorial. 
+
+## The quick conclusion at this point would be: There is a 95-98% probability the loading rate is greater in the laced configuration with an estimated difference of 1.09 BW/s. 
+### I will show a quick linear mixed model below to show that we find similar results. While these methods provide similar outcomes, I find the probabilistic method to be more intuitive to explain based on % improvmenets rather than talking through the nuances of asymptotes and Frequentist assumptions. 
+
+## Below is linear mixed effects model with a similar structure and similar output, see below:
+### We can use the lme4 package to fig a 'random intercept' and a random intercept and random slope model for subjects. I find the term random intercept/slope to be confusing, so I prefer to think of it as a subject-specific intercept and subject-specific slope. These models (like the Bayesian ones we will fit below) say 'we expect there to be some global change due to the variable we modify (e.g. lace or DD in this case), but this may differ beteween runners. 
+
+### Because we only have 4 subjects, fitting the 'maximally random' model (subject-specific intercepts and slopes) does not converge and gives you a singularity issue. 
+```{r}
+SSIntercept <- lmer(RateNorm ~ Config + (1|Subject), data = dat)
+summary(SSIntercept)
+
+randModel <- lmer(RateNorm ~ 1 + (Config | Subject), data = dat)
+```
+### The subject-specific intercept model suggests there is a 1.13 body weight difference in loading rate with a standard error of 0.55. We could run this against a less complex model to find 'statistical significance' but honestly, that is not what we are after. I only show this example to show the similarities / differences with the Bayesian approach. 
+
+# If you want to learn more, I highly recommend Richard McElreath's course and the deep rabbit hole of probabilistic modeling! Feedback (kind feedback) is also always welcome :) 
